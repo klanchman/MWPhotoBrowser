@@ -15,6 +15,8 @@
 
 #define PADDING                  10
 
+static void * MWVideoPlayerObservation = &MWVideoPlayerObservation;
+
 @implementation MWPhotoBrowser
 
 #pragma mark - Init
@@ -89,6 +91,7 @@
 }
 
 - (void)dealloc {
+    [self clearCurrentVideo];
     _pagingScrollView.delegate = nil;
     [[NSNotificationCenter defaultCenter] removeObserver:self];
     [self releaseAllUnderlyingPhotos:NO];
@@ -331,11 +334,14 @@
 	[super viewWillAppear:animated];
     
     // Status bar
-    _leaveStatusBarAlone = [self presentingViewControllerPrefersStatusBarHidden];
-    if (CGRectEqualToRect([[UIApplication sharedApplication] statusBarFrame], CGRectZero)) {
-        // If the frame is zero then definitely leave it alone
-        _leaveStatusBarAlone = YES;
+    if (!_viewHasAppearedInitially) {
+        _leaveStatusBarAlone = [self presentingViewControllerPrefersStatusBarHidden];
+        // Check if status bar is hidden on first appear, and if so then ignore it
+        if (CGRectEqualToRect([[UIApplication sharedApplication] statusBarFrame], CGRectZero)) {
+            _leaveStatusBarAlone = YES;
+        }
     }
+    // Set style
     if (!_leaveStatusBarAlone && UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPhone) {
         _previousStatusBarStyle = [[UIApplication sharedApplication] statusBarStyle];
         [[UIApplication sharedApplication] setStatusBarStyle:UIStatusBarStyleLightContent animated:animated];
@@ -355,12 +361,38 @@
         if (_startOnGrid) {
             [self showGrid:NO];
         }
-        _viewHasAppearedInitially = YES;
+    }
+    
+    // If rotation occured while we're presenting a modal
+    // and the index changed, make sure we show the right one now
+    if (_currentPageIndex != _pageIndexBeforeRotation) {
+        [self jumpToPageAtIndex:_pageIndexBeforeRotation animated:NO];
     }
 
 }
 
+- (void)viewDidAppear:(BOOL)animated {
+    [super viewDidAppear:animated];
+    _viewIsActive = YES;
+    
+    // Autoplay if first is video
+    if (!_viewHasAppearedInitially) {
+        if (_autoPlayOnAppear) {
+            MWPhoto *photo = [self photoAtIndex:_currentPageIndex];
+            if ([photo respondsToSelector:@selector(isVideo)] && photo.isVideo) {
+                [self playVideoAtIndex:_currentPageIndex];
+            }
+        }
+    }
+    
+    _viewHasAppearedInitially = YES;
+        
+}
+
 - (void)viewWillDisappear:(BOOL)animated {
+    
+    // Detect if rotation occurs while we're presenting a modal
+    _pageIndexBeforeRotation = _currentPageIndex;
     
     // Check that we're being popped for good
     if ([self.navigationController.viewControllers objectAtIndex:0] != self &&
@@ -387,11 +419,6 @@
 	// Super
 	[super viewWillDisappear:animated];
     
-}
-
-- (void)viewDidAppear:(BOOL)animated {
-    [super viewDidAppear:animated];
-    _viewIsActive = YES;
 }
 
 - (void)willMoveToParentViewController:(UIViewController *)parent {
@@ -488,6 +515,9 @@
         if (page.selectedButton) {
             page.selectedButton.frame = [self frameForSelectedButton:page.selectedButton atIndex:index];
         }
+        if (page.playButton) {
+            page.playButton.frame = [self frameForPlayButton:page.playButton atIndex:index];
+        }
         
         // Adjust scales if bounds has changed since last time
         if (!CGRectEqualToRect(_previousLayoutBounds, self.view.bounds)) {
@@ -497,6 +527,9 @@
         }
 
 	}
+    
+    // Adjust video loading indicator if it's visible
+    [self positionVideoLoadingIndicator];
 	
 	// Adjust contentOffset to preserve page location based on values collected prior to location
 	_pagingScrollView.contentOffset = [self contentOffsetForPageAtIndex:indexPriorToLayout];
@@ -718,6 +751,7 @@
             [page displayImage];
             [self loadAdjacentPhotosIfNecessary:photo];
         } else {
+            
             // Failed to load
             [page displayImageFailure];
         }
@@ -749,6 +783,7 @@
 			[_recycledPages addObject:page];
             [page.captionView removeFromSuperview];
             [page.selectedButton removeFromSuperview];
+            [page.playButton removeFromSuperview];
             [page prepareForReuse];
 			[page removeFromSuperview];
 			MWLog(@"Removed page at index %lu", (unsigned long)pageIndex);
@@ -781,11 +816,29 @@
                 page.captionView = captionView;
             }
             
+            // Add play button if needed
+            if (page.displayingVideo) {
+                UIButton *playButton = [UIButton buttonWithType:UIButtonTypeCustom];
+                [playButton setImage:[UIImage imageForResourcePath:@"MWPhotoBrowser.bundle/PlayButtonOverlayLarge" ofType:@"png" inBundle:[NSBundle bundleForClass:[self class]]] forState:UIControlStateNormal];
+                [playButton setImage:[UIImage imageForResourcePath:@"MWPhotoBrowser.bundle/PlayButtonOverlayLargeTap" ofType:@"png" inBundle:[NSBundle bundleForClass:[self class]]] forState:UIControlStateHighlighted];
+                [playButton addTarget:self action:@selector(playButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
+                [playButton sizeToFit];
+                playButton.frame = [self frameForPlayButton:playButton atIndex:index];
+                [_pagingScrollView addSubview:playButton];
+                page.playButton = playButton;
+            }
+            
             // Add selected button
             if (self.displaySelectionButtons) {
                 UIButton *selectedButton = [UIButton buttonWithType:UIButtonTypeCustom];
                 [selectedButton setImage:[UIImage imageForResourcePath:@"MWPhotoBrowser.bundle/ImageSelectedOff" ofType:@"png" inBundle:[NSBundle bundleForClass:[self class]]] forState:UIControlStateNormal];
-                [selectedButton setImage:[UIImage imageForResourcePath:@"MWPhotoBrowser.bundle/ImageSelectedOn" ofType:@"png" inBundle:[NSBundle bundleForClass:[self class]]] forState:UIControlStateSelected];
+                UIImage *selectedOnImage;
+                if (self.customImageSelectedIconName) {
+                    selectedOnImage = [UIImage imageNamed:self.customImageSelectedIconName];
+                } else {
+                    selectedOnImage = [UIImage imageForResourcePath:@"MWPhotoBrowser.bundle/ImageSelectedOn" ofType:@"png" inBundle:[NSBundle bundleForClass:[self class]]];
+                }
+                [selectedButton setImage:selectedOnImage forState:UIControlStateSelected];
                 [selectedButton sizeToFit];
                 selectedButton.adjustsImageWhenHighlighted = NO;
                 [selectedButton addTarget:self action:@selector(selectedButtonTapped:) forControlEvents:UIControlEventTouchUpInside];
@@ -853,10 +906,16 @@
 // Handle page changes
 - (void)didStartViewingPageAtIndex:(NSUInteger)index {
     
+    // Handle 0 photos
     if (![self numberOfPhotos]) {
         // Show controls
         [self setControlsHidden:NO animated:YES permanent:YES];
         return;
+    }
+    
+    // Handle video on page change
+    if (!_rotating || index != _currentVideoIndex) {
+        [self clearCurrentVideo];
     }
     
     // Release images further away than +/-1
@@ -956,17 +1015,25 @@
 
 - (CGRect)frameForSelectedButton:(UIButton *)selectedButton atIndex:(NSUInteger)index {
     CGRect pageFrame = [self frameForPageAtIndex:index];
+    CGFloat padding = 20;
     CGFloat yOffset = 0;
     if (![self areControlsHidden]) {
         UINavigationBar *navBar = self.navigationController.navigationBar;
         yOffset = navBar.frame.origin.y + navBar.frame.size.height;
     }
-    CGFloat statusBarOffset = [[UIApplication sharedApplication] statusBarFrame].size.height;
-    CGRect captionFrame = CGRectMake(pageFrame.origin.x + pageFrame.size.width - 20 - selectedButton.frame.size.width,
-                                     statusBarOffset + yOffset,
-                                     selectedButton.frame.size.width,
-                                     selectedButton.frame.size.height);
-    return CGRectIntegral(captionFrame);
+    CGRect selectedButtonFrame = CGRectMake(pageFrame.origin.x + pageFrame.size.width - selectedButton.frame.size.width - padding,
+                                            padding + yOffset,
+                                            selectedButton.frame.size.width,
+                                            selectedButton.frame.size.height);
+    return CGRectIntegral(selectedButtonFrame);
+}
+
+- (CGRect)frameForPlayButton:(UIButton *)playButton atIndex:(NSUInteger)index {
+    CGRect pageFrame = [self frameForPageAtIndex:index];
+    return CGRectMake(floorf(CGRectGetMidX(pageFrame) - playButton.frame.size.width / 2),
+                      floorf(CGRectGetMidY(pageFrame) - playButton.frame.size.height / 2),
+                      playButton.frame.size.width,
+                      playButton.frame.size.height);
 }
 
 #pragma mark - UIScrollView Delegate
@@ -1033,7 +1100,16 @@
 	// Buttons
 	_previousButton.enabled = (_currentPageIndex > 0);
 	_nextButton.enabled = (_currentPageIndex < numberOfPhotos - 1);
-    _actionButton.enabled = [[self photoAtIndex:_currentPageIndex] underlyingImage] != nil;
+    
+    // Disable action button if there is no image or it's a video
+    MWPhoto *photo = [self photoAtIndex:_currentPageIndex];
+    if ([photo underlyingImage] == nil || ([photo respondsToSelector:@selector(isVideo)] && photo.isVideo)) {
+        _actionButton.enabled = NO;
+        _actionButton.tintColor = [UIColor clearColor]; // Tint to hide button
+    } else {
+        _actionButton.enabled = YES;
+        _actionButton.tintColor = nil;
+    }
 	
 }
 
@@ -1080,6 +1156,122 @@
     }
     if (index != NSUIntegerMax) {
         [self setPhotoSelected:selectedButton.selected atIndex:index];
+    }
+}
+
+- (void)playButtonTapped:(id)sender {
+    UIButton *playButton = (UIButton *)sender;
+    NSUInteger index = NSUIntegerMax;
+    for (MWZoomingScrollView *page in _visiblePages) {
+        if (page.playButton == playButton) {
+            index = page.index;
+            break;
+        }
+    }
+    if (index != NSUIntegerMax) {
+        if (!_currentVideoPlayerViewController) {
+            [self playVideoAtIndex:index];
+        }
+    }
+}
+
+#pragma mark - Video
+
+- (void)playVideoAtIndex:(NSUInteger)index {
+    id photo = [self photoAtIndex:index];
+    if ([photo respondsToSelector:@selector(getVideoURL:)]) {
+        
+        // Valid for playing
+        _currentVideoIndex = index;
+        [self clearCurrentVideo];
+        [self setVideoLoadingIndicatorVisible:YES atPageIndex:index];
+        
+        // Get video and play
+        [photo getVideoURL:^(NSURL *url) {
+            if (url) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [self _playVideo:url atPhotoIndex:index];
+                });
+            } else {
+                [self setVideoLoadingIndicatorVisible:NO atPageIndex:index];
+            }
+        }];
+        
+    }
+}
+
+- (void)_playVideo:(NSURL *)videoURL atPhotoIndex:(NSUInteger)index {
+
+    // Setup player
+    _currentVideoPlayerViewController = [[MPMoviePlayerViewController alloc] initWithContentURL:videoURL];
+    [_currentVideoPlayerViewController.moviePlayer prepareToPlay];
+    _currentVideoPlayerViewController.moviePlayer.shouldAutoplay = YES;
+    _currentVideoPlayerViewController.moviePlayer.scalingMode = MPMovieScalingModeAspectFit;
+    _currentVideoPlayerViewController.modalTransitionStyle = UIModalTransitionStyleCrossDissolve;
+    
+    // Remove the movie player view controller from the "playback did finish" notification observers
+    // Observe ourselves so we can get it to use the crossfade transition
+    [[NSNotificationCenter defaultCenter] removeObserver:_currentVideoPlayerViewController
+                                                    name:MPMoviePlayerPlaybackDidFinishNotification
+                                                  object:_currentVideoPlayerViewController.moviePlayer];
+    [[NSNotificationCenter defaultCenter] addObserver:self
+                                             selector:@selector(videoFinishedCallback:)
+                                                 name:MPMoviePlayerPlaybackDidFinishNotification
+                                               object:_currentVideoPlayerViewController.moviePlayer];
+
+    // Show
+    [self presentViewController:_currentVideoPlayerViewController animated:YES completion:nil];
+
+}
+
+- (void)videoFinishedCallback:(NSNotification*)notification {
+    
+    // Remove observer
+    [[NSNotificationCenter defaultCenter] removeObserver:self
+                                                    name:MPMoviePlayerPlaybackDidFinishNotification
+                                                  object:_currentVideoPlayerViewController.moviePlayer];
+    
+    // Clear up
+    [self clearCurrentVideo];
+    
+    // Dismiss
+    BOOL error = [[[notification userInfo] objectForKey:MPMoviePlayerPlaybackDidFinishReasonUserInfoKey] intValue] == MPMovieFinishReasonPlaybackError;
+    if (error) {
+        // Error occured so dismiss with a delay incase error was immediate and we need to wait to dismiss the VC
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            [self dismissViewControllerAnimated:YES completion:nil];
+        });
+    } else {
+        [self dismissViewControllerAnimated:YES completion:nil];
+    }
+    
+}
+
+- (void)clearCurrentVideo {
+    if (!_currentVideoPlayerViewController) return;
+    [_currentVideoLoadingIndicator removeFromSuperview];
+    _currentVideoPlayerViewController = nil;
+    _currentVideoLoadingIndicator = nil;
+    _currentVideoIndex = NSUIntegerMax;
+}
+
+- (void)setVideoLoadingIndicatorVisible:(BOOL)visible atPageIndex:(NSUInteger)pageIndex {
+    if (_currentVideoLoadingIndicator && !visible) {
+        [_currentVideoLoadingIndicator removeFromSuperview];
+        _currentVideoLoadingIndicator = nil;
+    } else if (!_currentVideoLoadingIndicator && visible) {
+        _currentVideoLoadingIndicator = [[UIActivityIndicatorView alloc] initWithFrame:CGRectZero];
+        [_currentVideoLoadingIndicator sizeToFit];
+        [_currentVideoLoadingIndicator startAnimating];
+        [_pagingScrollView addSubview:_currentVideoLoadingIndicator];
+        [self positionVideoLoadingIndicator];
+    }
+}
+
+- (void)positionVideoLoadingIndicator {
+    if (_currentVideoLoadingIndicator && _currentVideoIndex != NSUIntegerMax) {
+        CGRect frame = [self frameForPageAtIndex:_currentVideoIndex];
+        _currentVideoLoadingIndicator.center = CGPointMake(CGRectGetMidX(frame), CGRectGetMidY(frame));
     }
 }
 
@@ -1284,6 +1476,10 @@
     }
 }
 
+- (UIStatusBarStyle)preferredStatusBarStyle {
+    return UIStatusBarStyleLightContent;
+}
+
 - (UIStatusBarAnimation)preferredStatusBarUpdateAnimation {
     return UIStatusBarAnimationSlide;
 }
@@ -1306,6 +1502,7 @@
 
 - (BOOL)areControlsHidden { return (_toolbar.alpha == 0); }
 - (void)hideControls { [self setControlsHidden:YES animated:YES permanent:NO]; }
+- (void)showControls { [self setControlsHidden:NO animated:YES permanent:NO]; }
 - (void)toggleControls { [self setControlsHidden:![self areControlsHidden] animated:YES permanent:NO]; }
 
 #pragma mark - Properties
@@ -1355,61 +1552,55 @@
 #pragma mark - Actions
 
 - (void)actionButtonPressed:(id)sender {
-    if (_actionsSheet) {
+
+    // Only react when image has loaded
+    id <MWPhoto> photo = [self photoAtIndex:_currentPageIndex];
+    if ([self numberOfPhotos] > 0 && [photo underlyingImage]) {
         
-        // Dismiss
-        [_actionsSheet dismissWithClickedButtonIndex:_actionsSheet.cancelButtonIndex animated:YES];
-        
-    } else {
-        
-        // Only react when image has loaded
-        id <MWPhoto> photo = [self photoAtIndex:_currentPageIndex];
-        if ([self numberOfPhotos] > 0 && [photo underlyingImage]) {
+        // If they have defined a delegate method then just message them
+        if ([self.delegate respondsToSelector:@selector(photoBrowser:actionButtonPressedForPhotoAtIndex:)]) {
             
-            // If they have defined a delegate method then just message them
-            if ([self.delegate respondsToSelector:@selector(photoBrowser:actionButtonPressedForPhotoAtIndex:)]) {
-                
-                // Let delegate handle things
-                [self.delegate photoBrowser:self actionButtonPressedForPhotoAtIndex:_currentPageIndex];
-                
-            } else {
-                
-                // Show activity view controller
-                NSMutableArray *items = [NSMutableArray arrayWithObject:[photo underlyingImage]];
-                if (photo.caption) {
-                    [items addObject:photo.caption];
-                }
-                self.activityViewController = [[UIActivityViewController alloc] initWithActivityItems:items applicationActivities:nil];
-                
-                // Show loading spinner after a couple of seconds
-                double delayInSeconds = 2.0;
-                dispatch_time_t popTime = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delayInSeconds * NSEC_PER_SEC));
-                dispatch_after(popTime, dispatch_get_main_queue(), ^(void){
-                    if (self.activityViewController) {
-                        [self showProgressHUDWithMessage:nil];
-                    }
-                });
-
-                // Show
-                typeof(self) __weak weakSelf = self;
-                [self.activityViewController setCompletionHandler:^(NSString *activityType, BOOL completed) {
-                    weakSelf.activityViewController = nil;
-                    [weakSelf hideControlsAfterDelay];
-                    [weakSelf hideProgressHUD:YES];
-                }];
-                // iOS 8 - Set the Anchor Point for the popover
-                if (SYSTEM_VERSION_GREATER_THAN_OR_EQUAL_TO(@"8")) {
-                    self.activityViewController.popoverPresentationController.barButtonItem = _actionButton;
-                }
-                [self presentViewController:self.activityViewController animated:YES completion:nil];
-
+            // Let delegate handle things
+            [self.delegate photoBrowser:self actionButtonPressedForPhotoAtIndex:_currentPageIndex];
+            
+        } else {
+            
+            // Show activity view controller
+            NSMutableArray *items = [NSMutableArray arrayWithObject:[photo underlyingImage]];
+            if (photo.caption) {
+                [items addObject:photo.caption];
             }
+            self.activityViewController = [[UIActivityViewController alloc] initWithActivityItems:items applicationActivities:nil];
             
-            // Keep controls hidden
-            [self setControlsHidden:NO animated:YES permanent:YES];
+            // Show loading spinner after a couple of seconds
+            double delayInSeconds = 2.0;
+            dispatch_time_t popTime = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(delayInSeconds * NSEC_PER_SEC));
+            dispatch_after(popTime, dispatch_get_main_queue(), ^(void){
+                if (self.activityViewController) {
+                    [self showProgressHUDWithMessage:nil];
+                }
+            });
+
+            // Show
+            typeof(self) __weak weakSelf = self;
+            [self.activityViewController setCompletionHandler:^(NSString *activityType, BOOL completed) {
+                weakSelf.activityViewController = nil;
+                [weakSelf hideControlsAfterDelay];
+                [weakSelf hideProgressHUD:YES];
+            }];
+            // iOS 8 - Set the Anchor Point for the popover
+            if (SYSTEM_VERSION_GREATER_THAN_OR_EQUAL_TO(@"8")) {
+                self.activityViewController.popoverPresentationController.barButtonItem = _actionButton;
+            }
+            [self presentViewController:self.activityViewController animated:YES completion:nil];
 
         }
+        
+        // Keep controls hidden
+        [self setControlsHidden:NO animated:YES permanent:YES];
+
     }
+    
 }
 
 #pragma mark - Action Progress
@@ -1419,10 +1610,6 @@
         _progressHUD = [[MBProgressHUD alloc] initWithView:self.view];
         _progressHUD.minSize = CGSizeMake(120, 120);
         _progressHUD.minShowTime = 1;
-        // The sample image is based on the
-        // work by: http://www.pixelpressicons.com
-        // licence: http://creativecommons.org/licenses/by/2.5/ca/
-        self.progressHUD.customView = [[UIImageView alloc] initWithImage:[UIImage imageForResourcePath:@"MWPhotoBrowser.bundle/Checkmark" ofType:@"png" inBundle:[NSBundle bundleForClass:[self class]]]];
         [self.view addSubview:_progressHUD];
     }
     return _progressHUD;
